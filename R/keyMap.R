@@ -14,36 +14,69 @@ setGeneric("mapIDToRanges", signature="db",
 setMethod("mapIDToRanges", "TxDb",
           function(db,
                    vals,
-                   keytype = c("cds", "exon", "tx", "gene"),
-                   by = keytype,
-                   column = NULL,
+                   type = c("cds", "exon", "tx", "gene"),
+                   columns = NULL,
                    ...)
 {
-    keytype <- match.arg(keytype)
-    by <- match.arg(by, c("cds", "exon", "tx", "gene"))
+    assert(is.list(vals) && is.named(vals),
+        "'vals' must be a named list")
 
-    if (keytype == by) {
-        fun <- switch(keytype,
-                      cds = cds,
-                      exon = exons,
-                      tx = transcripts,
-                      gene = genes)
-        res <- fun(db, vals, column = unique(c(names(vals), column)), ...)
-        matches <- BiocGenerics::match(mcols(res)[[names(vals)]], vals[[1]])
-        ranges <- rep(res, vapply(matches, length, integer(1)))
-        mcols(ranges)[[names(vals)]] <- NULL
-        split(ranges, vals[[1]][BiocGenerics::unlist(matches)])
-    } else {
-        fun <- switch(by,
-               cds = cdsBy,
-               exon = exonsBy,
-               tx = transcriptsBy)
-        res <- fun(db, keytype, ..., use.names = TRUE)
-        res[vals[[1]]]
-    }
+    assert(is.null(columns) || is.character(columns),
+           "'column' must be 'NULL' or a character vector")
+
+    type <- match.arg(type)
+
+    fun <- switch(type,
+                  cds = GenomicFeatures::cds,
+                  exon = GenomicFeatures::exons,
+                  tx = GenomicFeatures::transcripts,
+                  gene = GenomicFeatures::genes)
+
+    res <- fun(db, vals, columns = unique(c(names(vals), columns)), ...)
+    matches <- BiocGenerics::match(mcols(res)[[names(vals)]], vals[[1]])
+    ranges <- rep(res, vapply(matches, length, integer(1)))
+    mcols(ranges)[[names(vals)]] <- NULL
+    res2 <- GRangesList(split(ranges, vals[[1]][BiocGenerics::unlist(matches)]))
+    res2[match(vals[[1]], names(res2))]
 })
 
-#exons()/transcripts()/cds() -> findOverlaps()
+setGeneric("mapRangesToID", signature="db",
+    function(db, ...) standardGeneric("mapRangesToID")
+)
+
+setMethod("mapRangesToID", "TxDb",
+          function(db,
+                   ranges,
+                   type = c("cds", "exon", "tx", "gene"),
+                   id = NULL,
+                   columns = NULL,
+                   ...)
+{
+    type <- match.arg(type)
+    assert(is.null(columns) || is.character(columns),
+           "'column' must be 'NULL' or a character vector")
+
+    fun <- switch(type,
+                  cds = GenomicFeatures::cds,
+                  exon = GenomicFeatures::exons,
+                  tx = GenomicFeatures::transcripts,
+                  gene = GenomicFeatures::genes)
+
+    all <-
+        if (is.null(columns)) {
+            fun(db)
+        } else {
+            fun(db, columns = columns)
+        }
+
+    hits <- findOverlaps(ranges, all, ...)
+
+    res <- mcols(all[subjectHits(hits)])
+
+    # Add the input ids and put them as the first column
+    res$id <- names(ranges)[queryHits(hits)]
+    res[c(NCOL(res), seq_along(res)[-NCOL(res)])]
+})
 
 #setMethod("mapIDToRanges", "OrganismDb",
     #function(db, keys, keytype = NULL, columns = NULL, level =
@@ -93,42 +126,54 @@ setMethod("mapIDToRanges", "TxDb",
          #)
     #}
 
-#mapKey <- function(db, vals, valstype = c("cds", "exon", "transcript", "gene"), type = c("cds", "exon", "transcript", "gene"), columns = NULL) {
+mapKey <- function(db, vals, valstype = c("cds", "exon", "transcript", "gene"), type = c("cds", "exon", "transcript", "gene"), columns = NULL) {
 
-    #if (is.null(columns)) {
-        #type <- match.arg(type)
+    if (is.null(columns)) {
+        type <- match.arg(type)
 
-        #prefix <- switch(type,
-            #cds = "CDS",
-            #exon = "EXON",
-            #transcript = "TX"
-            #)
+        prefix <- switch(type,
+            cds = "CDS",
+            exon = "EXON",
+            transcript = "TX"
+            )
 
-        #columns <- paste0(prefix, c("CHROM", "START", "END", "STRAND"))
-    #}
+        columns <- paste0(prefix, c("CHROM", "START", "END", "STRAND"))
+    }
 
-    #if (is.null(keytype)) {
-        #keytype <- keytypes(db)[1L]
-    #}
+    if (is.null(keytype)) {
+        keytype <- keytypes(db)[1L]
+    }
 
-    #if (is.null(keys)) {
-        #keys <- head(keys(db, keytype), n = 3)
-    #}
-    #seqInfo <- tryCatch(seqinfo(db), error = function(e) NULL)
+    if (is.null(keys)) {
+        keys <- head(keys(db, keytype), n = 3)
+    }
+    seqInfo <- tryCatch(seqinfo(db), error = function(e) NULL)
 
-    #res <- suppressMessages(
-        #AnnotationDbi::select(db,
-            #keytype = keytype,
-            #columns = columns,
-            #keys = keys))
+    res <- suppressMessages(
+        AnnotationDbi::select(db,
+            keytype = keytype,
+            columns = columns,
+            keys = keys))
 
-    #split(
-        #makeGRangesFromDataFrame(res[, -1, drop = FALSE],
-            #seqinfo = seqInfo,
-            #keep.extra.columns = TRUE,
-            #seqnames.field = columns[1],
-            #start.field = columns[2],
-            #end.field = columns[3],
-            #strand.field = columns[4]),
-        #res[[keytype]])
-#}
+    split(
+        makeGRangesFromDataFrame(res[, -1, drop = FALSE],
+            seqinfo = seqInfo,
+            keep.extra.columns = TRUE,
+            seqnames.field = columns[1],
+            start.field = columns[2],
+            end.field = columns[3],
+            strand.field = columns[4]),
+        res[[keytype]])
+}
+
+assert <- function(x, message) {
+    if(!x) {
+        stop(message, call. = FALSE)
+    }
+}
+
+is.named <- function(x) {
+    nm <- names(x)
+    !is.null(nm) && all(!is.na(nm) & nm != "")
+}
+
